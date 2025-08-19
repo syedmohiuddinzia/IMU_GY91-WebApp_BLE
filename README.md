@@ -2,6 +2,9 @@
 This repository contains two web applications built with HTML, CSS, and JavaScript for working with **ESP32 BLE sensor data**.  
 Both apps connect to an ESP32 over Bluetooth Low Energy (BLE) and visualize the received packets differently.
 
+These applications are designed to work with the hardware and firmware from the following project:  
+👉 [IMU_GY91-ESP32_BLE](https://github.com/syedmohiuddinzia/IMU_GY91-ESP32_BLE)
+
 ---
 
 ## 1. IMU GY91 - BLE Data Read - Web Application
