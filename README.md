@@ -18,7 +18,7 @@ It supports:
 - View real-time incoming packets in hex, binary, and IEEE754 formats  
 
 ### Screenshot
-![Packet Viewer Screenshot](./images/packet-viewer.png)
+![1](https://github.com/syedmohiuddinzia/IMU_GY91-WebApp_BLE/blob/main/media/1.png)
 
 ---
 
@@ -34,7 +34,8 @@ It is especially useful for monitoring **IMU (Inertial Measurement Unit)** readi
 - Up to 1500 data points stored and displayed  
 
 ### Screenshot
-![Graph Viewer Screenshot](./images/graph-viewer.png)
+![2_1](https://github.com/syedmohiuddinzia/IMU_GY91-WebApp_BLE/blob/main/media/2_1.png)
+![2_2](https://github.com/syedmohiuddinzia/IMU_GY91-WebApp_BLE/blob/main/media/2_2.png)
 
 ---
 
