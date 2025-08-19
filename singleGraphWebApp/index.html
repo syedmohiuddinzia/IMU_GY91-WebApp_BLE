@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ESP32 IMU Data - Web BLE</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" type="image/png" href="favicon.ico">
+    <link rel="stylesheet" type="text/css" href="style.css">
+    <meta charset="UTF-8">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+    <style>
+        /* Checkbox colors */
+        #checkboxes label { margin-right:10px; display:inline-block; cursor:pointer; }
+        #checkboxes input[type=checkbox] { accent-color: currentColor; } 
+        .ax { color: #B30000; } .ay { color: #2D7D2D; } .az { color: #1A4D8C; }
+	.gx { color: #C45A00; } .gy { color: #6A1B9A; } .gz { color: #00A0A0; }
+	.mx { color: #C2185B; } .my { color: #8BC34A; } .mz { color: #D88B8B; }
+	.la_x { color: #006666; } .la_y { color: #B39DDB; } .la_z { color: #795548; }
+	.qw { color: #D1C760; } .qx { color: #500000; } .qy { color: #76D7A3; }
+	.qz { color: #505000; } .ex { color: #D4A574; } .ey { color: #00004D; }
+	.ez { color: #505050; } .yaw { color: #D4B000; } .pitch { color: #2D6D5D; }
+	.roll { color: #B399D4; } .t { color: #707070; } .hD { color: #CC3700; }
+	.ta { color: #8B0000; } .p  { color: #006400; } .a  { color: #00008B; }
+    </style>
+</head>
+<body>
+    <div class="topnav">
+        <h1>ESP32 IMU Data - Web BLE Application</h1>
+    </div>
+
+    <div class="content">             
+        <div class="card-grid">
+            <div class="card">
+                <p>
+                    <button id="connectBleButton" class="connectButton">Connect to BLE Device</button>
+                    <button id="disconnectBleButton" class="disconnectButton">Disconnect BLE Device</button>
+                </p>
+                <p class="gray-label">BLE state: <strong><span id="bleState" style="color:#d13a30;">Disconnected</span></strong></p>
+            </div>
+
+            <div class="card">
+                <h2>Control LED</h2>
+                <button id="onButton" class="onButton">ON</button>
+                <button id="offButton" class="offButton">OFF</button>
+                <p class="gray-label">Last value sent: <span id="valueSent"></span></p>
+            </div>
+        </div>
+        
+    <div class="card-grid">
+        <div class="card">
+            <h2>IMU Data Graph</h2>
+                <div id="checkboxes">
+		    <label class="ax"><input type="checkbox" value="ax"> ax (m/s²)</label>
+		    <label class="ay"><input type="checkbox" value="ay"> ay (m/s²)</label>
+		    <label class="az"><input type="checkbox" value="az"> az (m/s²)</label>
+		    <label class="gx"><input type="checkbox" value="gx"> gx (rad/s)</label>
+		    <label class="gy"><input type="checkbox" value="gy"> gy (rad/s)</label>
+		    <label class="gz"><input type="checkbox" value="gz"> gz (rad/s)</label>
+		    <label class="mx"><input type="checkbox" value="mx"> mx (μT)</label>
+		    <label class="my"><input type="checkbox" value="my"> my (μT)</label>
+		    <label class="mz"><input type="checkbox" value="mz"> mz (μT)</label>
+		    <label class="la_x"><input type="checkbox" value="la_x"> la_x (m/s²)</label>
+		    <label class="la_y"><input type="checkbox" value="la_y"> la_y (m/s²)</label>
+		    <label class="la_z"><input type="checkbox" value="la_z"> la_z (m/s²)</label>
+		    <label class="qw"><input type="checkbox" value="qw"> qw </label>
+		    <label class="qx"><input type="checkbox" value="qx"> qx </label>
+		    <label class="qy"><input type="checkbox" value="qy"> qy </label>
+		    <label class="qz"><input type="checkbox" value="qz"> qz </label>
+		    <label class="ex"><input type="checkbox" value="ex"> ex (°)</label>
+		    <label class="ey"><input type="checkbox" value="ey"> ey (°)</label>
+		    <label class="ez"><input type="checkbox" value="ez"> ez (°)</label>
+		    <label class="yaw"><input type="checkbox" value="yaw"> yaw (°)</label>
+		    <label class="pitch"><input type="checkbox" value="pitch"> pitch (°)</label>
+		    <label class="roll"><input type="checkbox" value="roll"> roll (°)</label>
+		    <label class="t"><input type="checkbox" value="t"> t (°C)</label>
+		    <label class="hD"><input type="checkbox" value="hD"> hD (°)</label>
+		    <label class="ta"><input type="checkbox" value="ta"> ta (°C)</label>
+		    <label class="p"><input type="checkbox" value="p"> p (hPa)</label>
+		    <label class="a"><input type="checkbox" value="a"> a (m)</label>
+		</div>
+        </div>
+    </div>
+        <div class="card">
+            <canvas id="imuChart" height="300"></canvas>
+        </div>
+    </div>
+
+    <script>
+    document.addEventListener("DOMContentLoaded", function() {
+        // BLE buttons and elements
+        const connectButton = document.getElementById('connectBleButton');
+        const disconnectButton = document.getElementById('disconnectBleButton');
+        const onButton = document.getElementById('onButton');
+        const offButton = document.getElementById('offButton');
+        const latestValueSent = document.getElementById('valueSent');
+        const bleStateContainer = document.getElementById('bleState');
+
+        const deviceName = 'ESP32-BLE-Device';
+        const bleService = '19b10000-e8f2-537e-4f6c-d104768a1214';
+        const ledCharacteristic = '19b10002-e8f2-537e-4f6c-d104768a1214';
+        const sensorCharacteristic = '19b10001-e8f2-537e-4f6c-d104768a1214';
+
+        let bleServer, bleServiceFound, sensorCharacteristicFound;
+
+        connectButton.addEventListener('click', () => { if (navigator.bluetooth) connectToDevice(); });
+        disconnectButton.addEventListener('click', disconnectDevice);
+        onButton.addEventListener('click', () => writeOnCharacteristic(1));
+        offButton.addEventListener('click', () => writeOnCharacteristic(0));
+
+        // Chart.js setup
+        const maxPoints = 1500;
+        const timeLabels = [];
+        const imuData = {ax:[], ay:[], az:[], gx:[], gy:[], gz:[], mx:[], my:[], mz:[], la_x:[], la_y:[], la_z:[], qw:[], qx:[], qy:[], qz:[], ex:[], ey:[], ez:[], yaw:[], pitch:[], roll:[], t:[], hD:[], ta:[], p:[], a:[]};
+
+        const colors = ['#B30000','#2D7D2D','#1A4D8C','#C45A00','#6A1B9A','#00A0A0','#C2185B','#8BC34A','#D88B8B','#006666','#B39DDB','#795548','#D1C760','#500000','#76D7A3','#505000','#D4A574','#00004D','#505050','#D4B000','#2D6D5D','#B399D4','#707070','#CC3700','#8B0000','#006400','#00008B'];
+
+        const datasets = Object.keys(imuData).map((key, idx) => ({
+            label: key,
+            borderColor: colors[idx],
+            backgroundColor: colors[idx],
+            data: [],
+            tension: 0.2,
+            borderWidth: 1,
+            pointRadius: 0,
+            hidden: true // all datasets hidden initially
+        }));
+
+        const imuChart = new Chart(document.getElementById('imuChart'), {
+            type: 'line',
+            data: {labels: timeLabels, datasets: datasets},
+            options: {
+                animation:false,
+                scales: {
+                    x: {type:'time', time:{unit:'second', tooltipFormat:'HH:mm:ss'}, title:{display:true,text:'Time'}},
+                    y: {title:{display:true,text:'Value'}}
+                }
+            }
+        });
+
+        // Checkbox control
+        document.querySelectorAll('#checkboxes input[type=checkbox]').forEach(chk => {
+            const ds = imuChart.data.datasets.find(d => d.label === chk.value);
+            if(ds) ds.hidden = !chk.checked;
+
+            chk.addEventListener('change', e => {
+                if(ds) ds.hidden = !chk.checked;
+                imuChart.update('none');
+            });
+        });
+
+        // Handle incoming BLE data
+        function handleCharacteristicChange(event) {
+            const dataView = event.target.value;
+            const rawBytes = new Uint8Array(dataView.buffer);
+            const floats = [];
+            for (let i=0;i<rawBytes.length;i+=4){
+                if(i+3<rawBytes.length){
+                    floats.push(new DataView(rawBytes.slice(i,i+4).buffer).getFloat32(0,true));
+                }
+            }
+
+            const now = new Date();
+            timeLabels.push(now);
+
+            // map floats to imuData
+            imuData.ax.push(floats[0]); imuData.ay.push(floats[1]); imuData.az.push(floats[2]);
+            imuData.gx.push(floats[3]); imuData.gy.push(floats[4]); imuData.gz.push(floats[5]);
+            imuData.mx.push(floats[6]); imuData.my.push(floats[7]); imuData.mz.push(floats[8]);
+            imuData.la_x.push(floats[9]); imuData.la_y.push(floats[10]); imuData.la_z.push(floats[11]);
+            imuData.qw.push(floats[12]); imuData.qx.push(floats[13]); imuData.qy.push(floats[14]); imuData.qz.push(floats[15]);
+            imuData.ex.push(floats[16]); imuData.ey.push(floats[17]); imuData.ez.push(floats[18]);
+            imuData.yaw.push(floats[19]); imuData.pitch.push(floats[20]); imuData.roll.push(floats[21]);
+            imuData.t.push(floats[22]); imuData.hD.push(floats[23]);
+            imuData.ta.push(floats[24]); imuData.p.push(floats[25]); imuData.a.push(floats[26]);
+
+            while(timeLabels.length>maxPoints){
+                timeLabels.shift();
+                Object.keys(imuData).forEach(k=>imuData[k].shift());
+            }
+
+            // Update chart data arrays
+            imuChart.data.labels = timeLabels;
+            imuChart.data.datasets.forEach(d=>d.data = imuData[d.label]);
+            imuChart.update('none');
+        }
+
+        // BLE functions
+        function connectToDevice(){
+            navigator.bluetooth.requestDevice({filters:[{name:deviceName}], optionalServices:[bleService]})
+            .then(device=>{
+                bleStateContainer.innerHTML = 'Connected to ' + device.name;
+                bleStateContainer.style.color = "#24af37";
+                device.addEventListener('gattserverdisconnected', onDisconnected);
+                return device.gatt.connect();
+            })
+            .then(server=>{ bleServer=server; return server.getPrimaryService(bleService); })
+            .then(service=>{ bleServiceFound=service; return service.getCharacteristic(sensorCharacteristic); })
+            .then(char=>{ 
+                sensorCharacteristicFound=char;
+                char.addEventListener('characteristicvaluechanged', handleCharacteristicChange);
+                char.startNotifications();
+                return char.readValue();
+            })
+            .catch(err=>console.log('Error:',err));
+        }
+
+        function onDisconnected(event){
+            bleStateContainer.innerHTML = "Device disconnected";
+            bleStateContainer.style.color = "#d13a30";
+        }
+
+        function writeOnCharacteristic(value){
+            if(bleServer && bleServer.connected){
+                bleServiceFound.getCharacteristic(ledCharacteristic)
+                .then(ch=>ch.writeValue(new Uint8Array([value])))
+                .then(()=>{latestValueSent.innerHTML=value;})
+                .catch(err=>console.error(err));
+            }
+        }
+
+        function disconnectDevice(){
+            if(bleServer && bleServer.connected){
+                sensorCharacteristicFound.stopNotifications()
+                .then(()=>bleServer.disconnect())
+                .then(()=>{
+                    bleStateContainer.innerHTML="Device Disconnected";
+                    bleStateContainer.style.color="#d13a30";
+                })
+                .catch(err=>console.log(err));
+            }
+        }
+
+    }); // DOMContentLoaded
+    </script>
+</body>
+</html>
+
