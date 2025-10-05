@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ESP32 IMU Orientation - Filters (Raw / Complementary / Madgwick / Mahony / Kalman)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Three.js & helpers -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <style>
+    :root { --bg: #0f1115; --fg:#e9eef4; --muted:#9aa4af; --accent:#35a0ff; --good:#2ecc71; --bad:#ff5a5a; }
+    * { box-sizing: border-box; }
+    body { margin:0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    header { padding: 10px 16px; border-bottom: 1px solid #1c1f26; display:flex; align-items:center; gap:12px; flex-wrap: wrap;}
+    header h1 { font-size: 16px; margin:0; font-weight:600; color:#dce3ea; }
+    .badge { font-size:12px; padding:2px 6px; border-radius: 6px; background:#1a2430; color:#b8c2cc; border:1px solid #233042;}
+    .controls { display:flex; gap:10px; align-items:center; flex-wrap: wrap; }
+    .controls select, .controls input[type="range"] {
+      background:#0b0e13; color:#dfe7f1; border:1px solid #1e2633; border-radius:8px; padding:6px 8px;
+    }
+    .btn { background:#0b0e13; color:#dfe7f1; border:1px solid #1e2633; border-radius:10px; padding:8px 12px; cursor:pointer; }
+    .btn:hover { border-color:#2b3a50; }
+    .btn.primary { background:#0b1722; border-color:#233246; color:#e9f2ff; }
+    .state { display:flex; align-items:center; gap:6px; font-size:13px; color:var(--muted); }
+    .dot { width:10px; height:10px; border-radius:50%; background:var(--bad); box-shadow:0 0 8px #000 inset;}
+    .dot.ok { background:var(--good); }
+    .grid { display:grid; grid-template-columns: 1fr 320px; gap: 12px; padding: 12px; }
+    #viewer { width:100%; height:65vh; border:1px solid #1c1f26; border-radius:12px; background:#0b0e13; position: relative; }
+    .panel { border:1px solid #1c1f26; border-radius:12px; padding:12px; background:#0b0e13; }
+    .kv { display:grid; grid-template-columns: 1fr auto; gap:6px; }
+    .kv .k { color:#9aa4af; }
+    .kv .v { font-weight:600; }
+    .row { display:flex; gap:10px; align-items:center; }
+    .small { font-size:12px; color:#9aa4af; }
+    .section-title { font-weight:700; margin:10px 0 6px; font-size:13px; color:#b6c2cf; }
+    .file-input { display:inline-block; }
+    .slider-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .slider-row label { min-width: 80px; }
+    .placeholder-text { 
+      position: absolute; 
+      top: 50%; 
+      left: 50%; 
+      transform: translate(-50%, -50%); 
+      color: #9aa4af; 
+      text-align: center; 
+      font-size: 16px; 
+      pointer-events: none; 
+    }
+  </style>
+</head>
+<body>
+<header>
+  <h1>IMU GY-91 · ESP32 BLE · Orientation Filters</h1>
+  <span class="badge">Web Bluetooth</span>
+  <div class="controls">
+    <button id="connectBtn" class="btn primary">Connect ESP32</button>
+    <button id="disconnectBtn" class="btn">Disconnect</button>
+
+    <label class="small">Filter</label>
+    <select id="filterSelect">
+      <option value="raw">Raw (ESP32 quaternion)</option>
+      <option value="complementary">Complementary</option>
+      <option value="madgwick">Madgwick</option>
+      <option value="mahony">Mahony</option>
+      <option value="kalman">Kalman (per-axis)</option>
+    </select>
+
+    <label class="small">β (Madgwick)</label>
+    <input type="range" id="betaSlider" min="0.01" max="0.5" value="0.1" step="0.01" />
+    <span id="betaVal" class="small">0.10</span>
+
+    <label class="small">Kp (Mahony)</label>
+    <input type="range" id="kpSlider" min="0.1" max="5" value="1.0" step="0.1" />
+    <span id="kpVal" class="small">1.0</span>
+
+    <label class="small">Q/R (Kalman)</label>
+    <input type="range" id="qrSlider" min="0.001" max="1.0" value="0.05" step="0.001" />
+    <span id="qrVal" class="small">0.050</span>
+  </div>
+  <div class="state">
+    <span id="bleDot" class="dot"></span>
+    <span id="bleLabel">Disconnected</span>
+  </div>
+</header>
+
+<div class="grid">
+  <div>
+    <div id="viewer">
+      <div class="placeholder-text">Load an STL file to visualize orientation</div>
+    </div>
+    <div style="display:flex; gap:10px; align-items:center; margin-top:10px;">
+      <label for="stlFile" class="btn file-input">Load STL</label>
+      <input type="file" id="stlFile" accept=".stl" style="display:none;" />
+      <span class="small">Tip: load your drone model (STL). No default model is shown.</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="section-title">Offset - Yaw</div>
+    	<div class="slider-row">
+	    <input type="range" id="yawOffsetSlider" min="-180" max="180" value="0" step="1"/>
+	    <label class="small">Yaw Offset</label>
+	    <span id="yawOffsetVal" class="small">0°</span>
+	</div>
+
+	<div class="slider-row">
+	    <input type="range" id="pitchOffsetSlider" min="-180" max="180" value="0" step="1"/>
+	    <label class="small">Pitch Offset</label>
+	    <span id="pitchOffsetVal" class="small">0°</span>
+	</div>
+
+	<div class="slider-row">
+	    <input type="range" id="rollOffsetSlider" min="-180" max="180" value="0" step="1"/>
+	    <label class="small">Roll Offset</label>
+	    <span id="rollOffsetVal" class="small">0°</span>
+	</div>
+    
+    <div class="section-title">Live Orientation</div>
+    <div class="kv">
+      <div class="k">Yaw</div><div class="v" id="yawText">0.0°</div>
+      <div class="k">Pitch</div><div class="v" id="pitchText">0.0°</div>
+      <div class="k">Roll</div><div class="v" id="rollText">0.0°</div>
+    </div>
+    <div class="section-title">Data (from ESP32)</div>
+    <div class="kv small">
+      <div class="k">ax ay az</div><div class="v" id="accText">0,0,1</div>
+      <div class="k">gx gy gz</div><div class="v" id="gyrText">0,0,0</div>
+      <div class="k">mx my mz</div><div class="v" id="magText">0,0,0</div>
+      <div class="k">qw qx qy qz</div><div class="v" id="quatText">1,0,0,0</div>
+      <div class="k">t / hD / T / P / Alt</div><div class="v" id="miscText">-</div>
+    </div>
+    <div class="section-title">Notes</div>
+    <ul class="small" style="margin-top:4px; padding-left:16px;">
+      <li>Assumes gyro units are deg/s. Adjust <code>GYRO_IS_DEG_PER_S</code> if needed.</li>
+      <li>For stable yaw, ensure your magnetometer is calibrated (soft/hard iron).</li>
+      <li>You can switch filters live; parameters update instantly.</li>
+      <li>Load an STL file to visualize orientation data.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+/* ============================ Config & State ============================ */
+const BLE_SERVICE_UUID = '19b10000-e8f2-537e-4f6c-d104768a1214';     // change if needed
+const BLE_CHAR_UUID    = '19b10001-e8f2-537e-4f6c-d104768a1214';     // change if needed
+const GYRO_IS_DEG_PER_S = true;                                      // set false if rad/s
+const USE_IMU_TIMESTAMP = false;                                     // set true if floats[22] is ms timestamp
+
+/* ============================ Three.js Setup ============================ */
+const viewer = document.getElementById('viewer');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0e13);
+const camera = new THREE.PerspectiveCamera(45, viewer.clientWidth / viewer.clientHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+renderer.setSize(viewer.clientWidth, viewer.clientHeight);
+viewer.appendChild(renderer.domElement);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.dampingFactor = 0.06;
+controls.minDistance = 3; controls.maxDistance = 15; controls.maxPolarAngle = Math.PI;
+camera.position.set(0, 2.0, 6.0);
+
+const hemi = new THREE.HemisphereLight(0x445566, 0x222233, 0.6);
+scene.add(hemi);
+const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+dir.position.set(10, 12, 6); dir.castShadow = true; scene.add(dir);
+
+const grid = new THREE.GridHelper(20, 20, 0x222222, 0x111111); grid.position.y = -2; scene.add(grid);
+
+let yawOffset = 0, pitchOffset = 0, rollOffset = 0;
+
+const yawSlider = document.getElementById('yawOffsetSlider');
+const pitchSlider = document.getElementById('pitchOffsetSlider');
+const rollSlider = document.getElementById('rollOffsetSlider');
+
+yawSlider.oninput = () => {
+  yawOffset = parseFloat(yawSlider.value) * Math.PI/180;
+  document.getElementById('yawOffsetVal').textContent = yawSlider.value + '°';
+};
+pitchSlider.oninput = () => {
+  pitchOffset = parseFloat(pitchSlider.value) * Math.PI/180;
+  document.getElementById('pitchOffsetVal').textContent = pitchSlider.value + '°';
+};
+rollSlider.oninput = () => {
+  rollOffset = parseFloat(rollSlider.value) * Math.PI/180;
+  document.getElementById('rollOffsetVal').textContent = rollSlider.value + '°';
+};
+
+// No default model - will be created when STL is loaded
+let drone = null;
+
+// Define initialRotation at a higher scope
+let initialRotation = { x: (Math.PI/2) * 3, y: (5*Math.PI)/6, z: 0 };
+
+// STL loader
+document.getElementById('stlFile').addEventListener('change', (ev) => {
+  const file = ev.target.files[0]; if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    // Remove placeholder text
+    const placeholder = document.querySelector('.placeholder-text');
+    if (placeholder) placeholder.style.display = 'none';
+    
+    const loader = new THREE.STLLoader();
+    const geometry = loader.parse(e.target.result);
+    geometry.computeBoundingBox();
+    const center = geometry.boundingBox.getCenter(new THREE.Vector3());
+    geometry.translate(-center.x, -center.y, -center.z);
+    const size = geometry.boundingBox.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const scale = 3.0 / maxDim;
+
+    const mat = new THREE.MeshPhongMaterial({ color: 0x2f80ff, specular:0x111111, shininess:200 });
+    
+    // Remove existing drone if any
+    if (drone) scene.remove(drone);
+    
+    drone = new THREE.Mesh(geometry, mat);
+    drone.scale.set(scale, scale, scale);
+    scene.add(drone);
+    
+    // Set initial rotation
+    drone.rotation.set(initialRotation.x, initialRotation.y, initialRotation.z);
+  };
+  reader.readAsArrayBuffer(file);
+});
+
+// Resize
+window.addEventListener('resize', () => {
+  camera.aspect = viewer.clientWidth / viewer.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(viewer.clientWidth, viewer.clientHeight);
+});
+
+/* ============================ UI Hooks ============================ */
+const connectBtn = document.getElementById('connectBtn');
+const disconnectBtn = document.getElementById('disconnectBtn');
+const filterSelect = document.getElementById('filterSelect');
+const betaSlider = document.getElementById('betaSlider');
+const kpSlider = document.getElementById('kpSlider');
+const qrSlider = document.getElementById('qrSlider');
+const betaVal = document.getElementById('betaVal');
+const kpVal = document.getElementById('kpVal');
+const qrVal = document.getElementById('qrVal');
+
+betaSlider.addEventListener('input', () => { 
+  if (madgwick) madgwick.beta = parseFloat(betaSlider.value); 
+  betaVal.textContent = (+betaSlider.value).toFixed(2); 
+});
+kpSlider.addEventListener('input', () => { 
+  if (mahony) mahony.Kp = parseFloat(kpSlider.value); 
+  kpVal.textContent = (+kpSlider.value).toFixed(1); 
+});
+qrSlider.addEventListener('input', () => {
+  const v = parseFloat(qrSlider.value);
+  if (kfYaw) {
+    kfYaw.Q = kfPitch.Q = kfRoll.Q = v; 
+    kfYaw.R = kfPitch.R = kfRoll.R = v;
+  }
+  qrVal.textContent = v.toFixed(3);
+});
+
+const bleDot = document.getElementById('bleDot');
+const bleLabel = document.getElementById('bleLabel');
+function setBleState(ok, text) {
+  bleDot.classList.toggle('ok', ok);
+  bleLabel.textContent = text;
+}
+
+/* ============================ Data + Displays ============================ */
+const yawText = document.getElementById('yawText');
+const pitchText = document.getElementById('pitchText');
+const rollText = document.getElementById('rollText');
+const accText = document.getElementById('accText');
+const gyrText = document.getElementById('gyrText');
+const magText = document.getElementById('magText');
+const quatText = document.getElementById('quatText');
+const miscText = document.getElementById('miscText');
+
+const imuData = {
+  ax:[], ay:[], az:[], gx:[], gy:[], gz:[], mx:[], my:[], mz:[],
+  la_x:[], la_y:[], la_z:[], qw:[], qx:[], qy:[], qz:[],
+  ex:[], ey:[], ez:[], yaw:[], pitch:[], roll:[], t:[], hD:[], ta:[], p:[], a:[]
+};
+
+/* ============================ BLE ============================ */
+let bleServer = null, bleChar = null, bleDevice = null;
+connectBtn.addEventListener('click', connectToBle);
+disconnectBtn.addEventListener('click', disconnectBle);
+
+async function connectToBle() {
+  try {
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'ESP32' }], // or use {name: 'ESP32-BLE-Device'}
+      optionalServices: [BLE_SERVICE_UUID]
+    });
+    bleDevice = device;
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+    setBleState(false, 'Connecting…');
+    const server = await device.gatt.connect();
+    bleServer = server;
+    const service = await server.getPrimaryService(BLE_SERVICE_UUID);
+    bleChar = await service.getCharacteristic(BLE_CHAR_UUID);
+    await bleChar.startNotifications();
+    bleChar.addEventListener('characteristicvaluechanged', onImuPacket);
+    setBleState(true, `Connected: ${device.name || 'ESP32'}`);
+  } catch (e) {
+    console.error(e);
+    setBleState(false, 'Failed to connect');
+  }
+}
+
+function disconnectBle() {
+  try {
+    if (bleChar) bleChar.stopNotifications().catch(()=>{});
+    if (bleServer && bleServer.connected) bleServer.disconnect();
+  } catch(e){ console.warn(e); }
+}
+
+function onDisconnected() {
+  setBleState(false, 'Disconnected');
+}
+
+/* ============================ Math Utils ============================ */
+const DEG2RAD = Math.PI/180, RAD2DEG = 180/Math.PI;
+
+function normalize(v) {
+  const n = Math.hypot(...v); if (n === 0) return v.map(()=>0);
+  return v.map(x => x/n);
+}
+
+function quatNormalize(q) {
+  const n = Math.hypot(q[0],q[1],q[2],q[3]); if (n===0) return [1,0,0,0];
+  return [q[0]/n, q[1]/n, q[2]/n, q[3]/n];
+}
+
+function quatMultiply(a,b){ // a*q*b form; [w,x,y,z]
+  const [aw,ax,ay,az] = a, [bw,bx,by,bz] = b;
+  return [
+    aw*bw - ax*bx - ay*by - az*bz,
+    aw*bx + ax*bw + ay*bz - az*by,
+    aw*by - ax*bz + ay*bw + az*bx,
+    aw*bz + ax*by - ay*bx + az*bw
+  ];
+}
+
+function quatFromGyro(gyroRad, dt) { // gyroRad = [gx,gy,gz] in rad/s
+  const [gx,gy,gz] = gyroRad;
+  const norm = Math.hypot(gx,gy,gz);
+  if (norm < 1e-12) return [1,0,0,0];
+  const theta = norm * dt;
+  const half = theta/2;
+  const s = Math.sin(half) / norm;
+  return [Math.cos(half), gx*s, gy*s, gz*s];
+}
+
+function quatToEuler(q) { // ZYX (yaw,pitch,roll)
+  const [w,x,y,z] = q;
+  const ys = 2*(w*z + x*y);
+  const yc = 1 - 2*(y*y + z*z);
+  const yaw = Math.atan2(ys, yc);
+
+  const sp = -2*(x*z - w*y);
+  const pitch = Math.abs(sp) >= 1 ? Math.sign(sp)*Math.PI/2 : Math.asin(sp);
+
+  const rs = 2*(w*x + y*z);
+  const rc = 1 - 2*(x*x + y*y);
+  const roll = Math.atan2(rs, rc);
+  return [yaw, pitch, roll]; // radians
+}
+
+/* Tilt-compensated yaw using accel + mag */
+function tiltCompHeading(ax,ay,az, mx,my,mz) {
+  // Normalize sensors
+  const a = normalize([ax,ay,az]);
+  const m = normalize([mx,my,mz]);
+
+  // compute roll & pitch from accel
+  const roll = Math.atan2(a[1], a[2]);
+  const pitch = Math.atan2(-a[0], Math.sqrt(a[1]*a[1] + a[2]*a[2]));
+
+  // rotate magnetometer into level frame
+  const sinr = Math.sin(roll), cosr = Math.cos(roll);
+  const sinp = Math.sin(pitch), cosp = Math.cos(pitch);
+  const mx2 = m[0]*cosp + m[2]*sinp;
+  const my2 = m[0]*sinr*sinp + m[1]*cosr - m[2]*sinr*cosp;
+
+  let heading = Math.atan2(-my2, mx2); // ENU
+  if (heading < 0) heading += 2*Math.PI;
+  return heading;
+}
+
+/* ============================ Filters ============================ */
+/* Complementary: keep quaternion by integrating gyro and blending accel/mag yaw/pitch/roll */
+let qComp = [1,0,0,0];
+function complementaryStep(ax,ay,az,gx,gy,gz,mx,my,mz, dt, alpha=0.98){
+  // integrate gyro
+  const gyroRad = [
+    (GYRO_IS_DEG_PER_S? gx*DEG2RAD: gx),
+    (GYRO_IS_DEG_PER_S? gy*DEG2RAD: gy),
+    (GYRO_IS_DEG_PER_S? gz*DEG2RAD: gz),
+  ];
+  const dq = quatFromGyro(gyroRad, dt);
+  qComp = quatNormalize(quatMultiply(qComp, dq));
+
+  // measured angles from accel/mag
+  const pitch_m = Math.atan2(ay, Math.sqrt(ax*ax + az*az));
+  const roll_m  = Math.atan2(-ax, az);
+  const yaw_m   = tiltCompHeading(ax,ay,az,mx,my,mz);
+
+  // current euler from q
+  let [yaw,pitch,roll] = quatToEuler(qComp);
+
+  // unwrap yaw to avoid jump near 180/-180
+  const dy = ((yaw_m - yaw + Math.PI) % (2*Math.PI)) - Math.PI;
+  yaw   = yaw   + (1-alpha)*dy;
+  pitch = alpha*pitch + (1-alpha)*pitch_m;
+  roll  = alpha*roll  + (1-alpha)*roll_m;
+
+  // rebuild quaternion from corrected Euler
+  const cy = Math.cos(yaw*0.5), sy = Math.sin(yaw*0.5);
+  const cp = Math.cos(pitch*0.5), sp = Math.sin(pitch*0.5);
+  const cr = Math.cos(roll*0.5),  sr = Math.sin(roll*0.5);
+  qComp = quatNormalize([
+    cr*cp*cy + sr*sp*sy,
+    sr*cp*cy - cr*sp*sy,
+    cr*sp*cy + sr*cp*sy,
+    cr*cp*sy - sr*sp*cy
+  ]);
+  return qComp;
+}
+
+/* Madgwick AHRS (full accel+mag) */
+class Madgwick {
+  constructor(beta=0.1) { this.beta = beta; this.q = [1,0,0,0]; }
+  step(gx,gy,gz, ax,ay,az, mx,my,mz, dt) {
+    // convert gyro to rad/s
+    gx = GYRO_IS_DEG_PER_S ? gx*DEG2RAD : gx;
+    gy = GYRO_IS_DEG_PER_S ? gy*DEG2RAD : gy;
+    gz = GYRO_IS_DEG_PER_S ? gz*DEG2RAD : gz;
+
+    let q1=this.q[0], q2=this.q[1], q3=this.q[2], q4=this.q[3];
+    const normAcc = Math.hypot(ax,ay,az); if (normAcc === 0) return this.q;
+    ax/=normAcc; ay/=normAcc; az/=normAcc;
+    const normMag = Math.hypot(mx,my,mz); if (normMag === 0) return this.q;
+    mx/=normMag; my/=normMag; mz/=normMag;
+
+    // Reference direction of Earth's magnetic field
+    const _2q1mx = 2*q1*mx, _2q1my=2*q1*my, _2q1mz=2*q1*mz;
+    const _2q2mx = 2*q2*mx;
+    const hx = mx*(q1*q1+q2*q2-q3*q3-q4*q4) + 2*my*(q2*q3 - q1*q4) + 2*mz*(q2*q4 + q1*q3);
+    const hy = 2*mx*(q2*q3 + q1*q4) + my*(q1*q1 - q2*q2 + q3*q3 - q4*q4) + 2*mz*(q3*q4 - q1*q2);
+    const _2bx = Math.sqrt(hx*hx + hy*hy);
+    const _2bz = 2*mx*(q2*q4 - q1*q3) + 2*my*(q1*q2 + q3*q4) + mz*(q1*q1 - q2*q2 - q3*q3 + q4*q4);
+
+    // Gradient descent algorithm corrective step
+    const _2q1 = 2*q1, _2q2 = 2*q2, _2q3 = 2*q3, _2q4 = 2*q4;
+    const _4q1 = 4*q1, _4q2 = 4*q2, _4q3 = 4*q3;
+    const _8q2 = 8*q2, _8q3 = 8*q3;
+
+    const s1 = -_2q3*(2*(q2*q4 - q1*q3) - ax) + _2q2*(2*(q1*q2 + q3*q4) - ay)
+      - _2bz*q3*(_2bx*(0.5 - q3*q3 - q4*q4) + _2bz*(q2*q4 - q1*q3) - mx)
+      + (-_2bx*q4 + _2bz*q2)*(_2bx*(q2*q3 - q1*q4) + _2bz*(q1*q2 + q3*q4) - my)
+      + _2bx*q3*(_2bx*(q1*q3 + q2*q4) + _2bz*(0.5 - q2*q2 - q3*q3) - mz);
+
+    const s2 = _2q4*(2*(q2*q4 - q1*q3) - ax) + _2q1*(2*(q1*q2 + q3*q4) - ay)
+      - 4*q2*(1 - 2*(q2*q2 + q3*q3) - az)
+      + _2bz*q4*(_2bx*(0.5 - q3*q3 - q4*q4) + _2bz*(q2*q4 - q1*q3) - mx)
+      + (_2bx*q3 + _2bz*q1)*(_2bx*(q2*q3 - q1*q4) + _2bz*(q1*q2 + q3*q4) - my)
+      + (_2bx*q4 - _4q2*_2bx)*(_2bx*(q1*q3 + q2*q4) + _2bz*(0.5 - q2*q2 - q3*q3) - mz);
+
+    const s3 = -_2q1*(2*(q2*q4 - q1*q3) - ax) + _2q4*(2*(q1*q2 + q3*q4) - ay)
+      - 4*q3*(1 - 2*(q2*q2 + q3*q3) - az)
+      + (-_4q3*_2bx - _2bz*q1)*(_2bx*(0.5 - q3*q3 - q4*q4) + _2bz*(q2*q4 - q1*q3) - mx)
+      + (_2bx*q2 + _2bz*q4)*(_2bx*(q2*q3 - q1*q4) + _2bz*(q1*q2 + q3*q4) - my)
+      + (_2bx*q1 - _4q3*_2bz)*(_2bx*(q1*q3 + q2*q4) + _2bz*(0.5 - q2*q2 - q3*q3) - mz);
+
+    const s4 = _2q2*(2*(q2*q4 - q1*q3) - ax) + _2q3*(2*(q1*q2 + q3*q4) - ay)
+      + (-_4q4*_2bx + _2bz*q2)*(_2bx*(0.5 - q3*q3 - q4*q4) + _2bz*(q2*q4 - q1*q3) - mx)
+      + (-_2bx*q1 + _2bz*q3)*(_2bx*(q2*q3 - q1*q4) + _2bz*(q1*q2 + q3*q4) - my)
+      + _2bx*q2*(_2bx*(q1*q3 + q2*q4) + _2bz*(0.5 - q2*q2 - q3*q3) - mz);
+
+    const normS = Math.hypot(s1,s2,s3,s4) || 1;
+    const b = this.beta;
+    const qDot1 = 0.5*(-q2*gx - q3*gy - q4*gz) - b*(s1/normS);
+    const qDot2 = 0.5*( q1*gx + q3*gz - q4*gy) - b*(s2/normS);
+    const qDot3 = 0.5*( q1*gy - q2*gz + q4*gx) - b*(s3/normS);
+    const qDot4 = 0.5*( q1*gz + q2*gy - q3*gx) - b*(s4/normS);
+
+    q1 += qDot1*dt; q2 += qDot2*dt; q3 += qDot3*dt; q4 += qDot4*dt;
+    this.q = quatNormalize([q1,q2,q3,q4]);
+    return this.q;
+  }
+}
+
+/* Mahony AHRS (acc+mag, PI-less variant with Kp only for simplicity) */
+class Mahony {
+  constructor(Kp=1.0) { this.q=[1,0,0,0]; this.Kp=Kp; }
+  step(gx,gy,gz, ax,ay,az, mx,my,mz, dt) {
+    gx = GYRO_IS_DEG_PER_S ? gx*DEG2RAD : gx;
+    gy = GYRO_IS_DEG_PER_S ? gy*DEG2RAD : gy;
+    gz = GYRO_IS_DEG_PER_S ? gz*DEG2RAD : gz;
+
+    let [q1,q2,q3,q4] = this.q;
+
+    // normalize
+    const an = Math.hypot(ax,ay,az); if (!an) return this.q;
+    ax/=an; ay/=an; az/=an;
+    const mn = Math.hypot(mx,my,mz); if (!mn) return this.q;
+    mx/=mn; my/=mn; mz/=mn;
+
+    // estimated direction of gravity (from q)
+    const vx = 2*(q2*q4 - q1*q3);
+    const vy = 2*(q1*q2 + q3*q4);
+    const vz = q1*q1 - q2*q2 - q3*q3 + q4*q4;
+
+    // error is cross product between estimated and measured gravity
+    const ex = (ay*vz - az*vy);
+    const ey = (az*vx - ax*vz);
+    const ez = (ax*vy - ay*vx);
+
+    // Apply feedback terms
+    gx += this.Kp*ex; gy += this.Kp*ey; gz += this.Kp*ez;
+
+    // integrate rate of change of quaternion
+    const qDot1 = 0.5*(-q2*gx - q3*gy - q4*gz);
+    const qDot2 = 0.5*( q1*gx + q3*gz - q4*gy);
+    const qDot3 = 0.5*( q1*gy - q2*gz + q4*gx);
+    const qDot4 = 0.5*( q1*gz + q2*gy - q3*gx);
+
+    q1 += qDot1*dt; q2 += qDot2*dt; q3 += qDot3*dt; q4 += qDot4*dt;
+    this.q = quatNormalize([q1,q2,q3,q4]);
+    return this.q;
+  }
+}
+
+/* Simple per-axis 1D Kalman filters for yaw/pitch/roll (process: integrate gyro; measurement: acc/mag) */
+class Kalman1D {
+  constructor(Q=0.05, R=0.05) { this.Q=Q; this.R=R; this.P=1; this.X=0; }
+  update(z, u=0, dt=0) { // x' = x + u*dt; z = measurement
+    // predict
+    this.X = this.X + u*dt;
+    this.P = this.P + this.Q;
+    // correct
+    const K = this.P / (this.P + this.R);
+    this.X = this.X + K*(z - this.X);
+    this.P = (1 - K)*this.P;
+    return this.X;
+  }
+}
+let kfYaw = new Kalman1D(0.05,0.05);
+let kfPitch = new Kalman1D(0.05,0.05);
+let kfRoll  = new Kalman1D(0.05,0.05);
+
+/* Filter instances */
+let madgwick = new Madgwick(0.1);
+let mahony = new Mahony(1.0);
+
+/* ============================ Main Fusion ============================ */
+let currentFilter = 'raw';
+filterSelect.addEventListener('change', e => currentFilter = e.target.value);
+
+let qCurrent = [1,0,0,0];
+let lastTimeMs = performance.now();
+
+function onImuPacket(e) {
+  const dv = e.target.value; // DataView
+  const floats = [];
+  for (let i=0; i<dv.byteLength; i+=4) floats.push(dv.getFloat32(i, true));
+
+  // --- map floats to imuData (exactly your mapping) ---
+  imuData.ax.push(floats[0]); imuData.ay.push(floats[1]); imuData.az.push(floats[2]);
+  imuData.gx.push(floats[3]); imuData.gy.push(floats[4]); imuData.gz.push(floats[5]);
+  imuData.mx.push(floats[6]); imuData.my.push(floats[7]); imuData.mz.push(floats[8]);
+  imuData.la_x.push(floats[9]); imuData.la_y.push(floats[10]); imuData.la_z.push(floats[11]);
+  imuData.qw.push(floats[12]); imuData.qx.push(floats[13]); imuData.qy.push(floats[14]); imuData.qz.push(floats[15]);
+  imuData.ex.push(floats[16]); imuData.ey.push(floats[17]); imuData.ez.push(floats[18]);
+  imuData.yaw.push(floats[19]); imuData.pitch.push(floats[20]); imuData.roll.push(floats[21]);
+  imuData.t.push(floats[22]); imuData.hD.push(floats[23]);
+  imuData.ta.push(floats[24]); imuData.p.push(floats[25]); imuData.a.push(floats[26]);
+
+  // extract latest sample
+  const ax=floats[0], ay=floats[1], az=floats[2];
+  const gx=floats[3], gy=floats[4], gz=floats[5];
+  const mx=floats[6], my=floats[7], mz=floats[8];
+  const qw=floats[12], qx=floats[13], qy=floats[14], qz=floats[15];
+  const yRaw=floats[19], pRaw=floats[20], rRaw=floats[21];
+  const tImuMs = floats[22];
+
+  // dt
+  let nowMs = performance.now();
+  let dt = (nowMs - lastTimeMs) / 1000;
+  if (USE_IMU_TIMESTAMP && Number.isFinite(tImuMs)) {
+    // if your firmware's t is ms timestamp or delta, adapt here
+    // interpret as delta-ms:
+    dt = Math.max(0.001, tImuMs/1000);
+  }
+  lastTimeMs = nowMs;
+
+  // update small status displays
+  accText.textContent = `${ax.toFixed(2)}, ${ay.toFixed(2)}, ${az.toFixed(2)}`;
+  gyrText.textContent = `${gx.toFixed(2)}, ${gy.toFixed(2)}, ${gz.toFixed(2)}`;
+  magText.textContent = `${mx.toFixed(2)}, ${my.toFixed(2)}, ${mz.toFixed(2)}`;
+  quatText.textContent = `${qw.toFixed(3)}, ${qx.toFixed(3)}, ${qy.toFixed(3)}, ${qz.toFixed(3)}`;
+  miscText.textContent = `${tImuMs?.toFixed?.(0) ?? '-'} / ${floats[23]?.toFixed?.(1) ?? '-'} / ${floats[24]?.toFixed?.(1) ?? '-'} / ${floats[25]?.toFixed?.(1) ?? '-'} / ${floats[26]?.toFixed?.(1) ?? '-'}`;
+
+  // choose filter
+  switch (currentFilter) {
+    case 'raw': {
+      // use the ESP32 fusion quaternion directly
+      qCurrent = quatNormalize([qw,qx,qy,qz]);
+      break;
+    }
+    case 'complementary': {
+      qCurrent = complementaryStep(ax,ay,az, gx,gy,gz, mx,my,mz, dt, 0.98);
+      break;
+    }
+    case 'madgwick': {
+      if (!madgwick) madgwick = new Madgwick(parseFloat(betaSlider.value));
+      madgwick.beta = parseFloat(betaSlider.value);
+      qCurrent = madgwick.step(gx,gy,gz, ax,ay,az, mx,my,mz, dt);
+      break;
+    }
+    case 'mahony': {
+      if (!mahony) mahony = new Mahony(parseFloat(kpSlider.value));
+      mahony.Kp = parseFloat(kpSlider.value);
+      qCurrent = mahony.step(gx,gy,gz, ax,ay,az, mx,my,mz, dt);
+      break;
+    }
+    case 'kalman': {
+      if (!kfYaw) {
+        kfYaw = new Kalman1D(0.05,0.05);
+        kfPitch = new Kalman1D(0.05,0.05);
+        kfRoll = new Kalman1D(0.05,0.05);
+      }
+      
+      // measurement from sensors (acc+mag) as Euler; process from gyro (deg/s)
+      const pitch_m = Math.atan2(ay, Math.sqrt(ax*ax + az*az));         // rad
+      const roll_m  = Math.atan2(-ax, az);                              // rad
+      const yaw_m   = tiltCompHeading(ax,ay,az,mx,my,mz);               // rad
+
+      const gx_r = (GYRO_IS_DEG_PER_S? gx*DEG2RAD : gx);
+      const gy_r = (GYRO_IS_DEG_PER_S? gy*DEG2RAD : gy);
+      const gz_r = (GYRO_IS_DEG_PER_S? gz*DEG2RAD : gz);
+
+      const yaw   = kfYaw.update(yaw_m,   gz_r, dt);
+      const pitch = kfPitch.update(pitch_m, gy_r, dt);
+      const roll  = kfRoll.update(roll_m,  gx_r, dt);
+
+      // rebuild quaternion from filtered Euler
+      const cy = Math.cos(yaw*0.5), sy = Math.sin(yaw*0.5);
+      const cp = Math.cos(pitch*0.5), sp = Math.sin(pitch*0.5);
+      const cr = Math.cos(roll*0.5),  sr = Math.sin(roll*0.5);
+      qCurrent = quatNormalize([
+        cr*cp*cy + sr*sp*sy,
+        sr*cp*cy - cr*sp*sy,
+        cr*sp*cy + sr*cp*sy,
+        cr*cp*sy - sr*sp*cy
+      ]);
+      break;
+    }
+  }
+
+  // Only apply rotation if we have a drone model loaded
+  if (drone) {
+    const [yaw,pitch,roll] = quatToEuler(qCurrent);
+    drone.rotation.x = initialRotation.x + pitch + pitchOffset;
+    drone.rotation.y = initialRotation.y + yaw + yawOffset;
+    drone.rotation.z = initialRotation.z + roll + rollOffset;
+
+    // UI degrees
+    yawText.textContent = (yaw*RAD2DEG).toFixed(1) + '°';
+    pitchText.textContent = (pitch*RAD2DEG).toFixed(1) + '°';
+    rollText.textContent = (roll*RAD2DEG).toFixed(1) + '°';
+  }
+}
+
+/* ============================ Render Loop ============================ */
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
